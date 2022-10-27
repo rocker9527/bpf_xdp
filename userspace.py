@@ -1,37 +1,102 @@
+from ctypes import c_int
+from ssl import PROTOCOL_TLS
 from bcc import BPF
-from bcc.utils import printb
-import time
+from sys import argv
 import struct
 import socket
 
-CLEANUP_PACKETS = 10
-MAX_AGE = 10
+
+ETH_P_IP = 8
+IPPROTO_TCP = 6
+IPPROTO_UDP = 17
 
 
-device = "enp0s6"
+def help():
+    print("USAGE: %s [-b block protocol] [--p port] [--a ip adress]" % argv[0])
+    exit()
+
+def usage():
+    print("USAGE: %s" % argv[0])
+    print("Try '%s -h' for more options." % argv[0])
+    exit()
+
+
+def clean_up(*argv):
+    for arg in argv:
+        arg.clear()
+
+ports = []
+prtcls = []
+adrs = []
+'''
+ can pass as many same args as I want
+ can't pass several protocols and several ports
+'''
+if len(argv) > 1: 
+    if(argv[1] == "-b"):
+        if(argv[2] == "tcp"):
+            prtcls.append(IPPROTO_TCP)
+        if(argv[2] == "udp"):
+            prtcls.append(IPPROTO_UDP)
+        if(argv[2] == "ip"):
+            prtcls.append(ETH_P_IP)
+        for i in range(2,len(argv)):
+            if(argv[i] == "-p" and argv[i+1].isdigit()):
+                if(1 <= int(argv[i+1]) <= 65535):
+                    ports.append(int(argv[i+1]))
+    else:    
+        usage()
+
+
+device = "lo"
 b = BPF(src_file="source_xdp.c")
 fn = b.load_func("capture", BPF.XDP)
 b.attach_xdp(device, fn, 0)
-
-while 1:
-    l2 = b.get_table("l2")
-    l3_ip = b.get_table("l3_ip")
-    l4_tcp = b.get_table("l4_tcp")
-    l4_udp = b.get_table("l4_udp")
-
-    if(len(l3_ip.items()) != 0): 
-        print("====================")
-        ip = l3_ip.items()[0][0]
-        print(f"IP ADDR_S: {socket.inet_ntoa(struct.pack('!I', ip.saddr))} ADDR_D: {socket.inet_ntoa(struct.pack('!I', ip.daddr))}")
-        if(len(l4_tcp.items()) != 0):
-            tcp = l4_tcp.items()[0][0]
-            print(f"TCP PORT_S: {int.from_bytes(struct.pack('!I', tcp.source), 'big')} DEST_D: {int.from_bytes(struct.pack('!I', tcp.dest), 'big')}")
-        if(len(l4_udp.items()) != 0):
-            udp = l4_udp.items()[0][0]
-            print(f"UDP PORT_S: {int.from_bytes(struct.pack('!I', udp.source), 'big')} DEST_D: {int.from_bytes(struct.pack('!I', udp.dest), 'big')}")
-    l2.clear()
-    l3_ip.clear()
-    l4_tcp.clear()
-    l4_udp.clear()
+for p in ports:
+    b.get_table("block_ports").push(c_int(p))
+for p in prtcls:
+    b["block_proto"].push(c_int(p))
+pkts_count = 0
+print(prtcls)
+try:
+    while 1:
+        #b.trace_print()
+        l2 = b.get_table("l2")
+        l3_ip = b.get_table("l3_ip")
+        l4_tcp = b.get_table("l4_tcp")
+        l4_udp = b.get_table("l4_udp")
+        if(len(l3_ip.items()) != 0): 
+            pkts_count += 1
+            print("====================")
+            ip = l3_ip.items()[0][0]
+            print(f"IP  [ADDR_D: {socket.inet_ntoa(struct.pack('!I', ip.saddr))}, ttl: {ip.ttl}, id: {ip.id}, len: {ip.tot_len}, id: {ip.id}]")
+            if(len(l4_tcp.items()) != 0):
+                tcp = l4_tcp.items()[0][0]
+                flags = ""
+                if(tcp.fin):
+                    flags += 'F,'
+                if(tcp.syn):
+                    flags += 'S,'
+                if(tcp.rst):
+                    flags += 'R,'
+                if(tcp.psh):
+                    flags += 'P,'
+                if(tcp.ack):
+                    flags += 'A,'
+                if(tcp.urg):
+                    flags += 'U,'
+                if(tcp.ece):
+                    flags += 'E,'
+                if(tcp.cwr):
+                    flags += 'E,'
+                flags = flags[:-1]
+                print(f"TCP [PORT_S: {tcp.source}, PORT_D: {tcp.dest}, FLAGS[{flags}], ack: {tcp.ack_seq}, seq: {tcp.seq}]")
+            elif(len(l4_udp.items()) != 0):
+                udp = l4_udp.items()[0][0]
+                print(f"UDP [PORT_S: {udp.source}, PORT_D: {udp.dest}]")
+        clean_up(b["l2"], b["l3_ip"], b["l4_tcp"], b["l4_udp"])
+except KeyboardInterrupt:
+    print(f"\n{pkts_count} packets recieved by filter")
+    clean_up(b["l2"], b["l3_ip"], b["l4_tcp"], b["l4_udp"])
 
 b.remove_xdp(device, 0)
