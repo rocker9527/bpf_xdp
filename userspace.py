@@ -1,9 +1,10 @@
-from ctypes import c_int
+from ctypes import c_int, c_uint, c_uint64
 from ssl import PROTOCOL_TLS
 from bcc import BPF
 from sys import argv
 import struct
 import socket
+import ctypes as ct
 
 
 ETH_P_IP = 8
@@ -28,6 +29,7 @@ def clean_up(*argv):
 ports = []
 prtcls = []
 adrs = []
+
 '''
  can pass as many same args as I want
  can't pass several protocols and several ports
@@ -48,28 +50,31 @@ if len(argv) > 1:
         usage()
 
 
-device = "lo"
+device = "enp0s6"
 b = BPF(src_file="source_xdp.c")
 fn = b.load_func("capture", BPF.XDP)
 b.attach_xdp(device, fn, 0)
-for p in ports:
-    b.get_table("block_ports").push(c_int(p))
-for p in prtcls:
-    b["block_proto"].push(c_int(p))
-pkts_count = 0
 print(prtcls)
+print(ports)
+for p in prtcls:
+    b["block_proto"].push(ct.c_int(p))
+for p in ports:
+    b["block_port"].push(ct.c_int(p))
+
+
+pkts_count = 0
 try:
     while 1:
         #b.trace_print()
         l2 = b.get_table("l2")
         l3_ip = b.get_table("l3_ip")
         l4_tcp = b.get_table("l4_tcp")
-        l4_udp = b.get_table("l4_udp")
-        if(len(l3_ip.items()) != 0): 
+        l4_udp = b.get_table("l4_udp") 
+        if(len(l3_ip.items()) != 0):  
             pkts_count += 1
             print("====================")
             ip = l3_ip.items()[0][0]
-            print(f"IP  [ADDR_D: {socket.inet_ntoa(struct.pack('!I', ip.saddr))}, ttl: {ip.ttl}, id: {ip.id}, len: {ip.tot_len}, id: {ip.id}]")
+            print(f"IP  [ADDR_S: {socket.inet_ntoa(struct.pack('!I', ip.saddr))}, ADDR_D: {socket.inet_ntoa(struct.pack('!I', ip.daddr))}, ttl: {ip.ttl}, id: {ip.id}, len: {ip.tot_len}, id: {ip.id}]")
             if(len(l4_tcp.items()) != 0):
                 tcp = l4_tcp.items()[0][0]
                 flags = ""
