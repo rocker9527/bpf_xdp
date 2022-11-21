@@ -4,76 +4,103 @@
 #include <linux/udp.h>
 #include <linux/if_arp.h>
 #include <linux/tcp.h>
-
+#include <linux/in.h>
 
 
 BPF_HASH(l2, struct ethhdr, int, 100);
-BPF_HASH(l3_ip, struct iphdr, int, 100);
-BPF_HASH(l4_tcp, struct tcphdr, int, 100);
-BPF_HASH(l4_udp, struct udphdr, int, 100);
-BPF_STACK(block_proto, int, 10);
-BPF_STACK(block_port, int, 10);
+//BPF_HASH(l3_ip, struct iphdr, int, 100);
+//BPF_HASH(l4_tcp, struct tcphdr, int, 100);
+//BPF_HASH(l4_udp, struct udphdr, int, 100);
+//BPF_STACK(block_proto, int, 10);
+//BPF_STACK(block_port, int, 10);
+BPF_HASH(block, int, uint16, 10);
+
+struct pkt
+{
+  struct xdp_md *ctx;
+  struct ethhdr *eth;
+  struct arphdr *arph;
+  struct iphdr *iph;
+  struct icmphdr *icmph;
+  struct tcphdr *tcph;
+  struct udphdr *udph;
+  struct dnshdr *dnsh;
+};
+
+
+int process_eth(struct pkt *p){
+  int tmp = -1;
+  if(block.lookup(&tmp))//block all traffic
+    return XDP_DROP;
+  struct ethhdr *eth = p->ctx->data;
+  if((void*)eth + sizeof(*eth) > p->ctx->data_end)
+    return XDP_DROP; //malformed packet
+  p->eth = eth;
+  if(block.lookup(htons(eth->h_proto)))//block network layer protocol
+    return XDP_DROP;
+  if(htons(eth->h_proto) == ETH_P_IP)
+      return process_ip(p);
+  if(htons(eth->h_proto) == ETH_P_ARP)
+      return process_arp(p);
+}
+
+
+int process_ip(struct pkt *p){
+  struct iphdr *iph = p->ctx->data + sizeof(*(p->eth));
+  if((void*)iph + sizeof(*iph) <= p->ctx->data_end)
+    return XDP_DROP;
+  p->iph = iph;
+  if(p->iph->protocol == IPPROTO_TCP)
+    return process_tcp(p);
+  if(p->iph->protocol == IPPROTO_UDP)
+    return process_udp(p);
+  if(p->iph->protocol == IPPROTO_ICMP)
+    return process_icmp(p);
+}
+
+
+int process_arp(struct pkt *p){
+  struct arphdr *arph = p->ctx->data + sizeof(*(p->eth));
+  if((void*)arph + sizeof(*arph) <= p->ctx->data_end)
+    return XDP_DROP;
+  p->arph = arph;
+  return XDP_PASS;
+}
+
+
+int process_icmp(struct pkt *p){
+  struct icmphdr *icmph = (struct icmphdr*)(p->iph + sizeof(*(p->iph)));
+  if((void*)icmph + sizeof(*icmph) > p->ctx->data_end)
+    return XDP_DROP;
+  p->icmph = icmph;
+  return XDP_PASS;
+}
+
+
+int process_tcp(struct pkt *p){
+  struct tcphdr *tcph = (struct tcphdr*)(p->iph + sizeof(*(p->iph)));
+  if((void*)tcph + sizeof(*tcph) > p->ctx->data_end)
+    return XDP_DROP;
+  p->tcph = tcph;
+  if((block.lookup(&(p->iph->protocol)) & p->tcph->dest) == p->tcph->dest)
+    return XDP_DROP;  
+  return XDP_PASS;
+}
+
+
+int process_udp(struct pkt *p){
+  struct udphdr *udph = (struct udphdr*)(p->iph + sizeof(*(p->iph)));
+  if((void*)udph + sizeof(*udph) > p->ctx->data_end)
+    return XDP_DROP;
+  p->udph = udph;
+  if((block.lookup(&(p->iph->protocol)) & p->udph->dest) == p->udph->dest)
+    return XDP_DROP;  
+  return XDP_PASS;
+}
+
 
 int capture(struct xdp_md *ctx){
-  int zero = 0;
-  int proto;
-  if(block_proto.pop(&proto) < 0)
-    proto = 0;
-  block_proto.push(&proto, 0);
-  int port;
-  if(block_port.pop(&port) < 0)
-    port = 0;
-  block_port.push(&port, 0);
-  bpf_trace_printk("%x %x", proto, port);
-  void *data = (void*)(long)ctx->data;
-  void *data_end = (void*)(long)ctx->data_end;
-  struct ethhdr *eth = data;
-  
-  /* Ethernet */
-
-  if((void*)eth + sizeof(*eth) <= data_end){
-    l2.lookup_or_try_init(eth, &zero);
-    
-    /* IPv4 */ 
-    
-    if(htons(eth->h_proto) == ETH_P_IP){
-      if(htons(proto) & ETH_P_IP)
-        return XDP_DROP;
-      else{
-        struct iphdr *iph = data + sizeof(*eth);
-        if((void*)iph + sizeof(*iph) <= data_end){
-          l3_ip.lookup_or_try_init(iph, &zero); 
-          if(iph->protocol == IPPROTO_TCP){
-            struct tcphdr *tcph = data + sizeof(*iph) + sizeof(*iph);
-            if((void*)tcph + sizeof(*tcph) <= data_end){
-            if(((proto & IPPROTO_TCP) & (tcph->dest & port)) || ((proto == 0) & (tcph->dest & port)) || ((proto & IPPROTO_TCP) & (port == 0)))
-              return XDP_DROP;
-            else{
-              
-              /* TCP */
-              
-                l4_tcp.lookup_or_try_init(tcph, &zero);
-                }
-              }
-            }
-        if(iph->protocol == IPPROTO_UDP){
-          struct udphdr *udph = data + sizeof(*iph) + sizeof(*iph);
-          if((void*)udph + sizeof(*udph) <= data_end){
-           if(((proto & IPPROTO_UDP) & (udph->dest & port)) || ((proto == 0) & (udph->dest & port)) || ((proto & IPPROTO_UDP) & (port == 0)))
-            return XDP_DROP;
-          else{
-            
-            /* UDP */
-            
-            
-            
-              l4_udp.lookup_or_try_init(udph, &zero);
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  return XDP_PASS;
+  struct pkt p;
+  p.ctx = ctx;
+  return process_eth(&p);
 }
