@@ -40,6 +40,6 @@ optional arguments:
 Отбросить все входяшие ICMP пакеты.
 
 ```
-python3 filter.py -iface enp0s6 -protocol icmp
+python3 filter.py enp0s6 -protocol icmp
 
 ```
